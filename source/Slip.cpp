@@ -29,6 +29,7 @@ static osRtxThread_t slip_thread_tcb;
 static osThreadAttr_t slip_thread_attr = {0};
 
 #define SIG_SL_RX       0x0001U
+#define SIG_SL_TX       0x0002U
 
 static void slip_if_lock(void);
 static void slip_if_unlock(void);
@@ -50,6 +51,8 @@ SlipMACDriver::SlipMACDriver(PinName tx, PinName rx, PinName rts, PinName cts) :
     pCurSlipTxBuffer = NULL;
     slip_rx_state = SLIP_RX_STATE_SYNCSEARCH;
     memset(slip_mac, 0, sizeof(slip_mac));
+
+
 }
 
 SlipMACDriver::~SlipMACDriver()
@@ -95,7 +98,14 @@ int8_t SlipMACDriver::slip_if_tx(uint8_t *buf, uint16_t len, uint8_t tx_id, data
         drv->phy_tx_done_cb(_pslipmacdriver->net_slip_id, tx_id, PHY_LINK_TX_SUCCESS, 0, 0);
     }
 
+    osThreadFlagsSet(slip_thread_id, SIG_SL_TX);
+        
     return 0;
+}
+
+void SlipMACDriver::slip_tx(void)
+{
+    _pslipmacdriver->txIrq();
 }
 
 void SlipMACDriver::txIrq(void)
@@ -283,7 +293,8 @@ int8_t SlipMACDriver::Slip_Init(uint8_t *mac, uint32_t backhaulBaud)
 
     baud(backhaulBaud);
 
-    attach(callback(this, &SlipMACDriver::rxIrq));
+    attach(callback(this, &SlipMACDriver::rxIrq), RxIrq);
+    attach(callback(this, &SlipMACDriver::txIrq), TxIrq);
 
     _pslipmacdriver->SLIP_IRQ_Thread_Create();
 
@@ -333,11 +344,17 @@ static __NO_RETURN void SLIP_IRQ_Thread(void *arg)
 {
     (void)arg;
     for (;;) {
-        uint32_t event = osThreadFlagsWait(SIG_SL_RX, osFlagsWaitAny, osWaitForever);
+        uint32_t event = osThreadFlagsWait(SIG_SL_RX | SIG_SL_TX, osFlagsWaitAny, osWaitForever);
 
         slip_if_lock();
         if (event & SIG_SL_RX) {
             _pslipmacdriver->buffer_handover();
+        } else if (event & SIG_SL_TX) {
+            // Critical section here cuz we're faking an interrupt and we don't want an actual one to occur
+            core_util_critical_section_enter();
+            _pslipmacdriver->slip_tx();
+            core_util_critical_section_exit();
+
         }
         slip_if_unlock();
     }
